@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_camera.h"
@@ -9,10 +11,16 @@
 #include <ArduinoJson.h>
 #include "camera_pins.h"
 #include "camera_code.h"
+// secrets.h необов'язковий: значення з нього лише підставляються за замовчуванням
+// у портал налаштування. Wi-Fi, токен і chat_id можна ввести з телефона.
 #if __has_include("secrets.h")
 #include "secrets.h"
-#else
-#error "Create Vision/secrets.h from Vision/secrets.example.h"
+#endif
+#ifndef BOT_TOKEN
+#define BOT_TOKEN ""
+#endif
+#ifndef ALLOWED_CHAT_ID
+#define ALLOWED_CHAT_ID ""
 #endif
 
 #define FLASH_LED_PIN 4
@@ -21,12 +29,15 @@
 #define WDT_TIMEOUT_S 60
 #define WIFI_CONNECT_TIMEOUT_MS 30000
 #define WIFI_RETRY_INTERVAL_MS 10000
-
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
+#define PORTAL_TIMEOUT_S 300
+#define PORTAL_AP_NAME "Vision-Setup"
 
 String BOTtoken = BOT_TOKEN;
 String CHAT_ID = ALLOWED_CHAT_ID;
+
+Preferences prefs;
+WiFiManager wm;
+bool shouldSaveConfig = false;
 
 int currentState   = LOW;
 int previousState  = LOW;
@@ -41,11 +52,10 @@ unsigned long lastTimeBotRun;
 unsigned long lastWiFiAttempt;
 
 // Підключення до Wi-Fi з таймаутом, щоб не зависати назавжди
+// Використовує мережу, збережену WiFiManager
 bool connectWiFi(unsigned long timeoutMs) {
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.disconnect();
-  WiFi.begin(ssid, password);
+  Serial.println("Reconnecting to WiFi");
+  WiFi.reconnect();
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - start > timeoutMs) {
@@ -60,6 +70,50 @@ bool connectWiFi(unsigned long timeoutMs) {
   Serial.print("ESP32-CAM IP Address: ");
   Serial.println(WiFi.localIP());
   return true;
+}
+
+void loadConfig() {
+  prefs.begin("vision", true);
+  BOTtoken = prefs.getString("token", BOTtoken);
+  CHAT_ID = prefs.getString("chat_id", CHAT_ID);
+  prefs.end();
+}
+
+void saveConfig() {
+  prefs.begin("vision", false);
+  prefs.putString("token", BOTtoken);
+  prefs.putString("chat_id", CHAT_ID);
+  prefs.end();
+}
+
+// Якщо збереженої мережі немає або вона недоступна, плата піднімає точку доступу
+// PORTAL_AP_NAME. Підключіться до неї з телефона і введіть Wi-Fi, токен бота та chat_id.
+void setupWiFi() {
+  WiFiManagerParameter tokenParam("token", "Telegram bot token", BOTtoken.c_str(), 64);
+  WiFiManagerParameter chatParam("chat_id", "Telegram chat_id", CHAT_ID.c_str(), 24);
+  wm.addParameter(&tokenParam);
+  wm.addParameter(&chatParam);
+  wm.setSaveConfigCallback([]() { shouldSaveConfig = true; });
+  wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
+  wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_MS / 1000);
+
+  // Без токена бот не працює, тому одразу відкриваємо портал
+  bool ok = BOTtoken.length() == 0 || CHAT_ID.length() == 0
+    ? wm.startConfigPortal(PORTAL_AP_NAME)
+    : wm.autoConnect(PORTAL_AP_NAME);
+
+  if (shouldSaveConfig) {
+    BOTtoken = tokenParam.getValue();
+    CHAT_ID = chatParam.getValue();
+    saveConfig();
+  }
+  if (!ok) {
+    Serial.println("WiFi setup failed, restarting...");
+    delay(1000);
+    ESP.restart();
+  }
+  Serial.print("ESP32-CAM IP Address: ");
+  Serial.println(WiFi.localIP());
 }
 
 void handleNewMessages(int numNewMessages) {
@@ -84,6 +138,7 @@ void handleNewMessages(int numNewMessages) {
       startMessage += "Або ви самі можете зробити фото використовуючи наступні команди: \n";
       startMessage += "/photo : Зробити нове фото у реальному часі\n";
       startMessage += "/flash : Увімкнути або вимкнути спалах при фотографуванні\n";
+      startMessage += "/resetwifi : Скинути налаштування Wi-Fi і відкрити точку доступу " PORTAL_AP_NAME "\n";
       startMessage += "Або використовуйте ці ж команди у зручному меню зліва від рядка введення\n";
       bot.sendMessage(CHAT_ID, startMessage, "");
     }
@@ -91,6 +146,14 @@ void handleNewMessages(int numNewMessages) {
       flashState = !flashState;
       Serial.println("Change flash LED state");
       bot.sendMessage(CHAT_ID, flashState?"Спалах увімкнено":"Спалах вимкнено");
+    }
+    if (text == "/resetwifi") {
+      bot.sendMessage(CHAT_ID, "Скидаю Wi-Fi. Підключіться до точки доступу " PORTAL_AP_NAME " для налаштування.", "");
+      // Підтверджуємо повідомлення, щоб після перезавантаження команда не виконалась знову
+      bot.getUpdates(bot.last_message_received + 1);
+      wm.resetSettings();
+      delay(1000);
+      ESP.restart();
     }
     if (text == "/photo") {
       sendPhoto = true;
@@ -219,18 +282,19 @@ void setup(){
 
   configInitCamera();
 
-  // Watchdog перезавантажить плату, якщо loop() зависне
-  esp_task_wdt_init(WDT_TIMEOUT_S, true);
-  esp_task_wdt_add(NULL);
-
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   myClient.setCACert(TELEGRAM_CERTIFICATE_ROOT); 
   Serial.println();
-  if (!connectWiFi(WIFI_CONNECT_TIMEOUT_MS)) {
-    Serial.println("Restarting...");
-    ESP.restart();
-  }
+
+  loadConfig();
+  // Портал може чекати до PORTAL_TIMEOUT_S, тому watchdog вмикаємо після нього
+  setupWiFi();
+  bot.updateToken(BOTtoken);
+
+  // Watchdog перезавантажить плату, якщо loop() зависне
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);
 
   setPowerSavingWifi();
 }

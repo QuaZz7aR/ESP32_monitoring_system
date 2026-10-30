@@ -1,9 +1,8 @@
-// Скопіюйте цей файл у secrets.h і заповніть своїми даними.
+// Необов'язковий файл. Скопіюйте його у secrets.h, щоб підставити значення
+// за замовчуванням у портал налаштування. Wi-Fi тепер налаштовується через
+// точку доступу Vision-Setup, а токен і chat_id можна ввести там же.
 // secrets.h додано до .gitignore, тому він не потрапить у репозиторій.
 #pragma once
-
-#define WIFI_SSID       "your-wifi-name"
-#define WIFI_PASSWORD   "your-wifi-password"
 
 // Токен бота від @BotFather
 #define BOT_TOKEN       "123456789:AAAA-your-bot-token"

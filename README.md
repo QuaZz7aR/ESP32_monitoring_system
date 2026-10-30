@@ -16,7 +16,10 @@
 
 1. Создай бота через [@BotFather](https://t.me/BotFather) и получи токен.
 2. Узнай свой chat_id, например через [@userinfobot](https://t.me/userinfobot).
-3. Скопируй `Vision/secrets.example.h` в `Vision/secrets.h` и впиши Wi-Fi, токен и chat_id. Файл `secrets.h` в `.gitignore` и в репозиторий не попадает.
+3. Прошей плату. При первом запуске она поднимет точку доступа **Vision-Setup**. Подключись к ней с телефона: откроется страница настройки (если нет, зайди на `192.168.4.1`). Выбери Wi-Fi, впиши токен бота и chat_id и сохрани.
+4. Настройки хранятся во flash-памяти и переживают перепрошивку. Если сохранённая сеть недоступна (например, камеру унесли в другое место), точка доступа поднимется снова на 5 минут, потом плата перезагрузится и попробует ещё раз.
+
+Чтобы не вводить токен вручную, можно скопировать `Vision/secrets.example.h` в `Vision/secrets.h`: значения оттуда подставятся в форму. Файл `secrets.h` в `.gitignore` и в репозиторий не попадает.
 
 ## Сборка
 
@@ -27,15 +30,16 @@ pio run -t upload
 pio device monitor
 ```
 
-**Arduino IDE**: открыть `Vision/Vision.ino`, плата «AI Thinker ESP32-CAM», ядро esp32 версии 2.0.x, библиотеки UniversalTelegramBot и ArduinoJson 6.x. С ядром 3.x код пока не собирается (другой API watchdog).
+**Arduino IDE**: открыть `Vision/Vision.ino`, плата «AI Thinker ESP32-CAM», ядро esp32 версии 2.0.x, библиотеки UniversalTelegramBot, ArduinoJson 6.x и WiFiManager (tzapu). С ядром 3.x код пока не собирается (другой API watchdog).
 
 ## Команды бота
 
 - `/start` — справка
 - `/photo` — сделать фото сейчас
 - `/flash` — включить или выключить вспышку
+- `/resetwifi` — забыть Wi-Fi и снова открыть точку доступа Vision-Setup
 
-Бот отвечает только chat_id из `secrets.h`.
+Бот отвечает только сохранённому chat_id.
 
 ## Надёжность
 

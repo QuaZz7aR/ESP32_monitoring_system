@@ -4,19 +4,29 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_camera.h"
+#include "esp_task_wdt.h"
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
 #include "camera_pins.h"
 #include "camera_code.h"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Create Vision/secrets.h from Vision/secrets.example.h"
+#endif
 
 #define FLASH_LED_PIN 4
 #define MOTION_SENSOR 13
 
-const char* ssid = "TP-LINK_CCE6";
-const char* password = "29969548";
+#define WDT_TIMEOUT_S 60
+#define WIFI_CONNECT_TIMEOUT_MS 30000
+#define WIFI_RETRY_INTERVAL_MS 10000
 
-String BOTtoken = "2113600032:AAEdI6Mff7htwtd_eibNom0rzURWIgBvtdE";
-String CHAT_ID = "608520577";
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
+
+String BOTtoken = BOT_TOKEN;
+String CHAT_ID = ALLOWED_CHAT_ID;
 
 int currentState   = LOW;
 int previousState  = LOW;
@@ -26,8 +36,31 @@ bool sendPhoto = false;
 WiFiClientSecure myClient;
 UniversalTelegramBot bot(BOTtoken, myClient);
 
-int botRequestDelay = 1000;
+unsigned long botRequestDelay = 1000;
 unsigned long lastTimeBotRun;
+unsigned long lastWiFiAttempt;
+
+// Підключення до Wi-Fi з таймаутом, щоб не зависати назавжди
+bool connectWiFi(unsigned long timeoutMs) {
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.disconnect();
+  WiFi.begin(ssid, password);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - start > timeoutMs) {
+      Serial.println("\nWiFi connect timeout");
+      return false;
+    }
+    esp_task_wdt_reset();
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+  Serial.print("ESP32-CAM IP Address: ");
+  Serial.println(WiFi.localIP());
+  return true;
+}
 
 void handleNewMessages(int numNewMessages) {
   Serial.print("Handle New Messages: ");
@@ -87,6 +120,10 @@ String sendPhotoToTelegram() {
     ESP.restart();
     return "Camera capture failed";
   }
+  if (WiFi.status() != WL_CONNECTED) {
+    esp_camera_fb_return(fb);
+    return "WiFi not connected";
+  }
   
   Serial.println("Connect to " + String(Domain));
 
@@ -109,26 +146,23 @@ String sendPhotoToTelegram() {
   
     uint8_t *fbBuf = fb->buf;
     size_t fbLen = fb->len;
-    for (size_t n=0;n<fbLen;n=n+1024) {
-      if (n+1024<fbLen) {
-        myClient.write(fbBuf, 1024);
-        fbBuf += 1024;
-      }
-      else if (fbLen%1024>0) {
-        size_t remainder = fbLen%1024;
-        myClient.write(fbBuf, remainder);
-      }
+    // Надсилаємо кадр частинами по 1024 байти (останню частину повністю,
+    // навіть якщо довжина кадру кратна 1024)
+    for (size_t n = 0; n < fbLen; n += 1024) {
+      size_t chunk = (fbLen - n < 1024) ? fbLen - n : 1024;
+      myClient.write(fbBuf + n, chunk);
     }
     
     myClient.print(tail);
     
     esp_camera_fb_return(fb);
     
-    int waitTime = 10000;
-    long startTimer = millis();
+    unsigned long waitTime = 10000;
+    unsigned long startTimer = millis();
     boolean state = false;
     
-    while ((startTimer + waitTime) > millis()){
+    while (millis() - startTimer < waitTime){
+      esp_task_wdt_reset();
       Serial.print(".");
       delay(100);
       while (myClient.available()) {
@@ -148,6 +182,7 @@ String sendPhotoToTelegram() {
     Serial.println(getBody);
   }
   else {
+    esp_camera_fb_return(fb);
     getBody="Connected to api.telegram.org failed.";
     Serial.println("Connected to api.telegram.org failed.");
   }
@@ -184,26 +219,34 @@ void setup(){
 
   configInitCamera();
 
+  // Watchdog перезавантажить плату, якщо loop() зависне
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(NULL);
+
   WiFi.mode(WIFI_STA);
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  WiFi.setAutoReconnect(true);
   myClient.setCACert(TELEGRAM_CERTIFICATE_ROOT); 
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(500);
+  Serial.println();
+  if (!connectWiFi(WIFI_CONNECT_TIMEOUT_MS)) {
+    Serial.println("Restarting...");
+    ESP.restart();
   }
 
   setPowerSavingWifi();
-  
-  Serial.println();
-  Serial.print("ESP32-CAM IP Address: ");
-  Serial.println(WiFi.localIP());
 }
 
 void loop() {
-  
+  esp_task_wdt_reset();
+
+  // Якщо зв'язок втрачено, пробуємо перепідключитися не частіше ніж раз на 10 с
+  if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWiFiAttempt > WIFI_RETRY_INTERVAL_MS) {
+      lastWiFiAttempt = millis();
+      connectWiFi(WIFI_CONNECT_TIMEOUT_MS);
+    }
+    return;
+  }
+
   motionDetect();
   
   if (sendPhoto) {
@@ -211,7 +254,7 @@ void loop() {
     sendPhotoToTelegram();
     sendPhoto = false;
   }
-  if (millis() > lastTimeBotRun + botRequestDelay)  {
+  if (millis() - lastTimeBotRun > botRequestDelay)  {
     int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
     while (numNewMessages) {
       Serial.println("got response");

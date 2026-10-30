@@ -73,7 +73,8 @@ bool connectWiFi(unsigned long timeoutMs) {
 }
 
 void loadConfig() {
-  prefs.begin("vision", true);
+  // Не read-only: інакше при першому запуску простір імен ще не існує і NVS пише помилку
+  prefs.begin("vision", false);
   BOTtoken = prefs.getString("token", BOTtoken);
   CHAT_ID = prefs.getString("chat_id", CHAT_ID);
   prefs.end();
@@ -278,7 +279,8 @@ void setup(){
 
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, flashState);
-  pinMode(MOTION_SENSOR, INPUT);
+  // Підтяжка до землі: без датчика вхід "висить" у повітрі й дає хибні спрацювання
+  pinMode(MOTION_SENSOR, INPUT_PULLDOWN);
 
   configInitCamera();
 
